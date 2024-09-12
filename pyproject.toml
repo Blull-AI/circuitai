@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=61.0.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "circuitai"
+version = "0.0.1"
+readme = "README.md"
+requires-python = ">=3.6"
+license = {text = "MIT"}
+authors = [
+    { name="Fábio Souza", email="fabio@blull.com.br" },
+]
+dependencies = []
+
+[project.urls]
+"Homepage" = "https://github.com/Blull-AI/circuitai"

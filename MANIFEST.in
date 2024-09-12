@@ -1,0 +1,23 @@
+# Exclude specific files and directories
+exclude .gitignore
+exclude .git/**
+
+# Exclude build artifacts
+exclude build/**
+exclude dist/**
+exclude *.egg-info/**
+
+# Exclude virtual environments
+exclude venv/**
+exclude env/**
+exclude ENV/**
+
+# Exclude tests
+exclude tests/**
+
+# Exclude documentation
+exclude docs/**
+
+# Exclude configuration files
+exclude *.cfg
+exclude *.ini

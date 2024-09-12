@@ -76,6 +76,3 @@ dist/
 
 # Ignore egg-info directory
 *.egg-info/
-
-# Ignore setup.py and related build scripts
-setup.py

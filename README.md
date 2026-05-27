@@ -16,66 +16,91 @@ import {
 
 const openai = createOpenAIProvider({
   apiKey: process.env.OPENAI_API_KEY!,
-  model: "gpt-4o",
+  model: "gpt-5.4-mini",
 });
 
 const ContextSchema = z.object({
-  transaction: z.object({
+  account: z.object({
     id: z.string(),
-    amountUsd: z.number(),
-    merchant: z.string(),
+    debtorName: z.string(),
+    outstandingUsd: z.number(),
+    daysPastDue: z.number(),
+    productType: z.enum(["credit_card", "personal_loan", "utility", "telecom"]),
   }),
-  riskScore: z.number().min(0).max(1).optional(),
-  decision: z.enum(["approve", "reject", "review"]).optional(),
+  recoverabilityScore: z.number().min(0).max(1).optional(),
+  nextAction: z
+    .enum(["sms_reminder", "outbound_call", "settlement_offer", "legal_escalation"])
+    .optional(),
 });
 type Ctx = z.infer<typeof ContextSchema>;
 
-const lookupMerchant = defineTool({
-  name: "lookupMerchant",
-  description: "Fetch 30-day dispute / volume stats for a merchant.",
-  schema: z.object({ merchant: z.string() }),
-  handler: async ({ merchant }) => ({ disputes: 1, volume: 25_000, merchant }),
+const lookupPaymentHistory = defineTool({
+  name: "lookupPaymentHistory",
+  description: "Fetch 90-day payment, promise-to-pay and contact-attempt history for a debtor.",
+  schema: z.object({ accountId: z.string() }),
+  handler: async ({ accountId }) => ({
+    accountId,
+    partialPayments: 1,
+    brokenPromises: 2,
+    callAttempts: 5,
+    rightPartyContacts: 1,
+  }),
 });
 
-const riskScorer = defineAgent({
-  name: "risk-scorer",
-  goal: "Compute a risk score for the transaction",
-  rules: "You are a fraud-risk analyst. JSON only.",
+const recoverabilityScorer = defineAgent({
+  name: "recoverability-scorer",
+  goal: "Estimate how likely this overdue account is to be collected",
+  rules: "You are a collections analyst at a debt-recovery agency. JSON only.",
   model: openai,
-  inputSchema: z.object({ transaction: ContextSchema.shape.transaction }),
-  outputSchema: z.object({ riskScore: z.number().min(0).max(1) }),
-  contextSelector: (ctx: Ctx) => ({ transaction: ctx.transaction }),
-  tools: [lookupMerchant],
+  inputSchema: z.object({ account: ContextSchema.shape.account }),
+  outputSchema: z.object({ recoverabilityScore: z.number().min(0).max(1) }),
+  contextSelector: (ctx: Ctx) => ({ account: ctx.account }),
+  tools: [lookupPaymentHistory],
 });
 
-const decider = defineAgent({
-  name: "decider",
-  goal: "Choose approve / reject / review",
-  rules: "JSON only.",
+const actionSelector = defineAgent({
+  name: "action-selector",
+  goal: "Pick the next-best collection action for the call center to dispatch",
+  rules:
+    "Map the recoverability score to one action: low → legal_escalation, mid → settlement_offer, high → outbound_call, very high → sms_reminder. JSON only.",
   model: openai,
-  inputSchema: z.object({ riskScore: z.number() }),
-  outputSchema: z.object({ decision: z.enum(["approve", "reject", "review"]) }),
-  contextSelector: (ctx: Ctx) => ({ riskScore: ctx.riskScore ?? 0 }),
+  inputSchema: z.object({ recoverabilityScore: z.number() }),
+  outputSchema: z.object({
+    nextAction: z.enum([
+      "sms_reminder",
+      "outbound_call",
+      "settlement_offer",
+      "legal_escalation",
+    ]),
+  }),
+  contextSelector: (ctx: Ctx) => ({ recoverabilityScore: ctx.recoverabilityScore ?? 0 }),
 });
 
 const project = defineProject({
-  name: "fraud-detection",
-  description: "Score and decide on transactions",
-  goal: "Produce a fraud decision per transaction",
+  name: "collection-decisioning",
+  description: "Score overdue accounts and route each one to the next-best collection action",
+  goal: "Produce a next-best collection action for every overdue account in the queue",
   contextSchema: ContextSchema,
-  agents: [riskScorer, decider],
+  agents: [recoverabilityScorer, actionSelector],
   supervisor: defineSupervisor<Ctx>({
     model: openai,
-    rules: "Route through scoring then deciding. Stop when `decision` is set.",
-    terminationCondition: (ctx) => ctx.decision !== undefined,
+    rules: "Score the account first, then pick the action. Stop when `nextAction` is set.",
+    terminationCondition: (ctx) => ctx.nextAction !== undefined,
     maxTurns: 8,
   }),
 });
 
 const finalContext = await project.run({
-  transaction: { id: "tx_1", amountUsd: 4_200, merchant: "acme" },
+  account: {
+    id: "acc_1042",
+    debtorName: "John Smith",
+    outstandingUsd: 4_200,
+    daysPastDue: 47,
+    productType: "credit_card",
+  },
 });
-console.log(finalContext.decision); // 'approve' | 'reject' | 'review'
+console.log(finalContext.nextAction);
+// 'sms_reminder' | 'outbound_call' | 'settlement_offer' | 'legal_escalation'
 ```
 
 ## Why @blull/circuitai
@@ -140,7 +165,7 @@ const project = defineProject({
 });
 
 const finalCtx = await project.run(initial);
-const runs = await project.storage.listRuns({ projectName: "fraud-detection" });
+const runs = await project.storage.listRuns({ projectName: "collection-decisioning" });
 const loaded = await project.storage.loadRun(runs[0]!.id);
 console.log(loaded?.events); // full event log
 ```
@@ -166,7 +191,7 @@ The `Telemetry` interface mirrors OpenTelemetry's `Tracer`/`Span` shapes so an O
 const graph = project.toJSON();
 // {
 //   schemaVersion: '1.0',
-//   name: 'fraud-detection',
+//   name: 'collection-decisioning',
 //   agents: [{ name, goal, rules, model, inputSchema: <JSONSchema>, outputSchema: <JSONSchema>, tools: [...] }],
 //   supervisor: { model, rules, maxTurns },
 //   tasks: [...],
@@ -194,7 +219,7 @@ Scripted responses for unit and integration tests. No network. No API keys.
 ## Examples
 
 - `examples/with-mock-provider/run.ts` — fully offline run using the mock provider.
-- `examples/fraud-detection/openai.ts` — same project with OpenAI's `gpt-4o`.
+- `examples/fraud-detection/openai.ts` — same project with OpenAI's `gpt-5.4-mini`.
 - `examples/fraud-detection/anthropic.ts` — same project with Anthropic's Claude.
 
 ```sh

@@ -127,9 +127,13 @@ The supervisor's decision is enforced by a Zod-validated discriminated union; in
 pnpm add @blull/circuitai zod
 # plus the providers you want:
 pnpm add openai @anthropic-ai/sdk
+# plus any durable adapters you want:
+pnpm add pg                  # Postgres storage
+pnpm add ioredis             # Redis storage
+pnpm add @opentelemetry/api  # OpenTelemetry traces
 ```
 
-> Requires Zod **v4** (peer). `openai` and `@anthropic-ai/sdk` are **optional** peers — install only what you use.
+> Requires Zod **v4** (peer). `openai`, `@anthropic-ai/sdk`, `pg`, `ioredis`, and `@opentelemetry/api` are all **optional** peers — install only what you use.
 
 ## Run lifecycle and events
 
@@ -144,6 +148,7 @@ for await (const event of project.stream(initialContext)) {
     case "agent.started":
     case "agent.tool_called":
     case "agent.completed":
+    case "agent.delta": // streamed content tokens (opt-in, see below)
     case "context.updated":
     case "project.completed":
     case "error":
@@ -153,6 +158,20 @@ for await (const event of project.stream(initialContext)) {
 ```
 
 `project.run(initialContext)` is the same loop, but it awaits to completion and returns the final context directly.
+
+### Streaming tokens
+
+Opt in with `{ stream: true }` to receive token-level `agent.delta` events as each agent's model produces them — ideal for live UIs:
+
+```ts
+for await (const event of project.stream(initialContext, { stream: true })) {
+  if (event.type === "agent.delta") {
+    process.stdout.write(event.delta); // live token-by-token output
+  }
+}
+```
+
+Deltas require the agent's provider to implement streaming (the OpenAI and Anthropic adapters do); providers without it fall back to a single non-streaming call. Deltas are **ephemeral** — they reach live consumers but are never written to storage, since the durable `agent.completed` event already carries the agent's complete output. Without `{ stream: true }` the stream behaves exactly as before.
 
 ## Persistence
 
@@ -170,7 +189,25 @@ const loaded = await project.storage.loadRun(runs[0]!.id);
 console.log(loaded?.events); // full event log
 ```
 
-Implement the `Storage` interface to plug into Postgres, Redis, S3, or anything else. @blull/circuitai v0.1 ships the in-memory default only; first-party adapters are on the v0.2 roadmap.
+First-party durable adapters ship for Postgres and Redis:
+
+```ts
+import { createPostgresStorage, createRedisStorage } from "@blull/circuitai";
+
+// Postgres (requires `pg`)
+const pg = createPostgresStorage({ connectionString: process.env.DATABASE_URL });
+await pg.ensureSchema(); // create the runs/events tables once — or run pg.schemaSql yourself
+
+// Redis (requires `ioredis`)
+const redis = createRedisStorage({ url: process.env.REDIS_URL, ttlSeconds: 60 * 60 * 24 });
+
+const project = defineProject({
+  // ...
+  storage: pg, // or redis
+});
+```
+
+Both implement the same `Storage` interface. Pass a pre-built `pool` / `client` instead of a URL when you want full connection control (and trivial test injection). Streamed `agent.delta` events are intentionally **not** persisted. You can still implement `Storage` yourself for any other backend (S3, DynamoDB, …).
 
 ## Telemetry
 
@@ -183,7 +220,19 @@ const project = defineProject({
 });
 ```
 
-The `Telemetry` interface mirrors OpenTelemetry's `Tracer`/`Span` shapes so an OTel adapter is a thin shim.
+The `Telemetry` interface mirrors OpenTelemetry's `Tracer`/`Span` shapes. To export to a real OTel pipeline, hand `createOtelTelemetry` a `Tracer` from your own SDK setup:
+
+```ts
+import { createOtelTelemetry } from "@blull/circuitai";
+import { trace } from "@opentelemetry/api";
+
+const project = defineProject({
+  // ...
+  telemetry: createOtelTelemetry({ tracer: trace.getTracer("my-app") }),
+});
+```
+
+The adapter imports **only types** from `@opentelemetry/api`, so the library never pulls in the OTel SDK at runtime — you own sampling, batching, and export.
 
 ## Visualizable graph
 
@@ -230,9 +279,9 @@ ANTHROPIC_API_KEY=sk-... pnpm tsx examples/fraud-detection/anthropic.ts
 
 ## Status
 
-@blull/circuitai is **v0.1** — focused on getting orchestration, type safety, persistence, observability, and visualization right. The roadmap:
+@blull/circuitai focuses on getting orchestration, type safety, persistence, observability, and visualization right. The roadmap:
 
-- **v0.2** — Postgres + Redis storage adapters, OpenTelemetry telemetry adapter, streaming tokens to event consumers.
+- **v0.2 (shipped)** — Postgres + Redis storage adapters, an OpenTelemetry telemetry adapter, and token streaming (`agent.delta` events).
 - **v0.3** — human-in-the-loop pause/resume, durable workflow primitives.
 - **v0.4** — @blull/circuitai Studio: a hosted visual editor for the project graph and a live debugger for runs.
 

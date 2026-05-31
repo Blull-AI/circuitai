@@ -106,7 +106,7 @@ console.log(finalContext.nextAction);
 ## Why @blull/circuitai
 
 1. **End-to-end typed with Zod.** Your context schema, every agent's input/output, every tool's input — one Zod schema each. Inference flows from `defineProject` all the way to `project.run(initialContext)`. No `as any`. No DSL.
-2. **Visualizable, serializable graphs.** `project.toJSON()` emits a JSON-Schema description of your agent team. Persist it, diff it in git, render it in a future Studio.
+2. **Visualizable, serializable graphs.** `project.toJSON()` emits a JSON-Schema description of your agent team. Persist it, diff it in git, or open it in **Studio** (`@blull/circuitai/studio`) — a self-hostable graph viewer and live run debugger.
 3. **Built-in durability.** Every run is a sequence of typed events against a typed context. The in-memory default ships out of the box; implement one `Storage` adapter to plug into Postgres, Redis, or anything else.
 4. **Hierarchical orchestration, not graph wiring.** No DAGs to draw. A supervisor LLM routes work dynamically based on the typed shared context. Bring your routing rules in plain English.
 5. **First-class tools, first-class observability.** Define tools with Zod schemas; @blull/circuitai runs the model → tool → model loop with validation and retries. Every step is a structured event you can stream, log, or replay.
@@ -150,6 +150,8 @@ for await (const event of project.stream(initialContext)) {
     case "agent.completed":
     case "agent.delta": // streamed content tokens (opt-in, see below)
     case "context.updated":
+    case "project.paused": // suspended for human input (see below)
+    case "project.resumed":
     case "project.completed":
     case "error":
       break;
@@ -209,6 +211,66 @@ const project = defineProject({
 
 Both implement the same `Storage` interface. Pass a pre-built `pool` / `client` instead of a URL when you want full connection control (and trivial test injection). Streamed `agent.delta` events are intentionally **not** persisted. You can still implement `Storage` yourself for any other backend (S3, DynamoDB, …).
 
+## Human-in-the-loop: pause & resume
+
+A run can **suspend itself for human input** and be **resumed later** — even from a different process — without re-running any completed work. The `project.paused` event written to storage *is* the durable checkpoint: it carries the full blackboard context, the turn cursor, and accumulated usage. `project.resume(runId)` restores that state and continues the supervisor loop.
+
+There are two ways to pause:
+
+1. **A deterministic gate** — `supervisor.pauseCondition`, checked each turn *before* the supervisor LLM is consulted (so a gate pause costs zero supervisor calls). This is the robust primitive for approval flows.
+2. **A supervisor decision** — the supervisor LLM can choose `{ kind: 'pause', reason, awaiting }` when it decides it needs a human.
+
+```ts
+const project = defineProject({
+  // ...
+  contextSchema: z.object({
+    amount: z.number(),
+    prepared: z.boolean().optional(),
+    approval: z.enum(["approved", "rejected"]).optional(),
+    executed: z.boolean().optional(),
+  }),
+  agents: [preparer, executor],
+  supervisor: defineSupervisor({
+    model: openai,
+    rules: "Prepare the action, then execute it only once it is approved.",
+    terminationCondition: (ctx) => ctx.executed === true,
+    // Pause once the action is prepared but not yet approved. The gate MUST be
+    // resolved by the resume input — otherwise the resumed run pauses again.
+    pauseCondition: (ctx) =>
+      ctx.prepared && !ctx.approval
+        ? { reason: "approval required", awaiting: "approve | reject" }
+        : undefined,
+  }),
+});
+
+// Run until it pauses. `run()` throws `run_paused` (it has no final context to
+// return); use `stream()` to observe the pause as an event instead.
+let runId = "";
+for await (const event of project.stream(initialContext)) {
+  if (event.type === "project.paused") {
+    runId = event.runId;
+    console.log(event.reason, event.awaiting); // surface to your reviewer UI
+  }
+}
+
+// ...later, possibly in another process — only the runId + shared storage are
+// needed. `resume` returns the same event stream as `stream()`; the human's
+// decision is merged into the restored context.
+let final;
+for await (const event of project.resume(runId, { input: { approval: "approved" } })) {
+  if (event.type === "project.completed") final = event.context;
+}
+```
+
+Resume continues from the checkpoint: the already-completed `preparer` is **not** re-invoked; the supervisor picks up from the restored context and runs `executor`. The full lifecycle (`project.started → … → project.paused → project.resumed → … → project.completed`) lives in one event log for audit.
+
+**Requirements and limits**
+
+- Resume needs the **same project definition** (agents, supervisor, tools) and the **same `Storage`** the run was created with. The code is the workflow; storage is the durable state.
+- The restored context must be **JSON-round-trippable** through your storage backend. `z.date()`, `Map`, `Set`, etc. drift through JSON; resume re-validates the restored context against your schema and fails fast at the `resume` stage if it does. Prefer JSON-native context (ISO strings, plain objects).
+- A run is resumable only while **paused** (`resume_not_found` / `resume_not_resumable` otherwise). The resume `input` is merged then re-validated; an invalid merge throws `schema_validation` and leaves the run cleanly paused.
+- **No resume locking (v0.3).** Two concurrent `resume(runId)` calls both load the same checkpoint and proceed — there is no atomic compare-and-swap on status. Serialize resumes of the same run yourself.
+
 ## Telemetry
 
 ```ts
@@ -248,7 +310,37 @@ const graph = project.toJSON();
 // }
 ```
 
-Diff your agent team in git, share it across services, render it in a future Studio.
+Diff your agent team in git, share it across services, or open it in **Studio** (next section).
+
+## Studio
+
+`@blull/circuitai/studio` is a self-hostable web surface that **visualizes your project graph** and **debugs runs** — replaying a finished run from storage, live-tailing one in flight, and resuming paused runs (HITL) from the browser. It reads everything from the `Storage` your projects already write to, plus `project.toJSON()` for the graph, so there is nothing new to instrument.
+
+```ts
+import { createStudioServer } from "@blull/circuitai/studio";
+
+// `storage` is the SAME instance your projects use, so Studio sees their runs.
+const studio = createStudioServer({
+  storage,
+  projects: [project], // optional — enables the graph view + HITL resume
+});
+studio.listen(3030); // http://localhost:3030
+```
+
+`createStudioServer` returns a framework-agnostic Node request `handler` (mount it in Express/etc.) plus a `listen()` convenience — **zero new runtime dependencies** (raw `node:http`). It exposes a small read API over your storage (`GET /api/projects`, `/api/projects/:name/graph`, `/api/runs`, `/api/runs/:id`), live events over SSE (`GET /api/runs/:id/events` — replays a finished run, tails a running one), and `POST /api/runs/:id/resume` for paused runs. Mount it under a sub-path with `basePath`.
+
+Two views:
+
+- **Graph** — the supervisor → agents → tools graph rendered from `toJSON()`, with each node's context/input/output JSON Schemas inspectable and the **active agent/tool node highlighted as a run streams**. "Export JSON" downloads the `ProjectGraph`.
+- **Timeline** — the full event log with a **step scrubber**: scrub any run to see the reconstructed context snapshot and the per-step diff, token/cost totals, and — for paused runs — a resume box that merges your input and continues the run.
+
+Studio is deliberately read-only over your data: it **does not launch runs** (that needs your providers/keys) and ships **no auth** — put it behind your own gateway if you expose it. Pass live `Project` instances to enable the graph view and resume; omit them for a pure run-debugger over any `Storage` backend (e.g. a shared Postgres). The graph view visualizes and exports the `ProjectGraph`; regenerating runnable code from an edited graph (`fromJSON`/codegen) is not part of v0.4.
+
+Try it offline — no API key (mock provider, with seeded and live runs):
+
+```sh
+pnpm tsx examples/studio/run.ts   # http://localhost:3030
+```
 
 ## Testing without API keys
 
@@ -258,7 +350,7 @@ import { createMockProvider } from "@blull/circuitai/testing";
 const agent = defineAgent({
   // ...
   model: createMockProvider({
-    responses: [{ structured: { riskScore: 0.72, flags: [] } }],
+    responses: [{ structured: { recoverabilityScore: 0.72, flags: [] } }],
   }),
 });
 ```
@@ -268,13 +360,17 @@ Scripted responses for unit and integration tests. No network. No API keys.
 ## Examples
 
 - `examples/with-mock-provider/run.ts` — fully offline run using the mock provider.
-- `examples/fraud-detection/openai.ts` — same project with OpenAI's `gpt-5.4-mini`.
-- `examples/fraud-detection/anthropic.ts` — same project with Anthropic's Claude.
+- `examples/human-in-the-loop/run.ts` — fully offline pause → human approval → resume, where a *second* project instance resumes the run from shared storage (mimicking another process).
+- `examples/studio/run.ts` — fully offline Studio: seeds completed/paused runs and a live-run generator into a shared in-memory store, then serves Studio at `http://localhost:3030`.
+- `examples/cobranca/openai.ts` — same project with OpenAI's `gpt-5.4-mini`.
+- `examples/cobranca/anthropic.ts` — same project with Anthropic's Claude.
 
 ```sh
 pnpm tsx examples/with-mock-provider/run.ts
-OPENAI_API_KEY=sk-... pnpm tsx examples/fraud-detection/openai.ts
-ANTHROPIC_API_KEY=sk-... pnpm tsx examples/fraud-detection/anthropic.ts
+pnpm tsx examples/human-in-the-loop/run.ts
+pnpm tsx examples/studio/run.ts          # then open http://localhost:3030
+OPENAI_API_KEY=sk-... pnpm tsx examples/cobranca/openai.ts
+ANTHROPIC_API_KEY=sk-... pnpm tsx examples/cobranca/anthropic.ts
 ```
 
 ## Status
@@ -282,8 +378,8 @@ ANTHROPIC_API_KEY=sk-... pnpm tsx examples/fraud-detection/anthropic.ts
 @blull/circuitai focuses on getting orchestration, type safety, persistence, observability, and visualization right. The roadmap:
 
 - **v0.2 (shipped)** — Postgres + Redis storage adapters, an OpenTelemetry telemetry adapter, and token streaming (`agent.delta` events).
-- **v0.3** — human-in-the-loop pause/resume, durable workflow primitives.
-- **v0.4** — @blull/circuitai Studio: a hosted visual editor for the project graph and a live debugger for runs.
+- **v0.3 (shipped)** — human-in-the-loop pause/resume on a durable event-log checkpoint: a `pauseCondition` gate, a supervisor `pause` decision, `project.paused` / `project.resumed` events, and `project.resume(runId, { input })`.
+- **v0.4 (shipped)** — @blull/circuitai Studio (`@blull/circuitai/studio`): a self-hostable visual graph viewer and live run debugger with human-in-the-loop resume, served over your existing `Storage` with zero new runtime dependencies.
 
 ## License
 

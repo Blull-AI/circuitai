@@ -1,6 +1,14 @@
+<p align="center">
+  <a href="https://sdk.blull.com.br">
+    <img src="https://raw.githubusercontent.com/Blull-AI/circuitai/main/assets/logo.png" alt="Blull" width="260" />
+  </a>
+</p>
+
 # @blull/circuitai
 
 > Type-safe, durable, observable orchestration for teams of AI agents.
+
+**Official website:** [sdk.blull.com.br](https://sdk.blull.com.br)
 
 @blull/circuitai helps you orchestrate teams of AI agents the way you'd orchestrate a real project team. Each agent has a role, a goal, and rules. A supervisor coordinates them toward a business goal. Everything is typed end-to-end with Zod — the context schema, every agent's input and output, every tool's input — and every run is a stream of structured events you can inspect, persist, and replay.
 
@@ -29,14 +37,20 @@ const ContextSchema = z.object({
   }),
   recoverabilityScore: z.number().min(0).max(1).optional(),
   nextAction: z
-    .enum(["sms_reminder", "outbound_call", "settlement_offer", "legal_escalation"])
+    .enum([
+      "sms_reminder",
+      "outbound_call",
+      "settlement_offer",
+      "legal_escalation",
+    ])
     .optional(),
 });
 type Ctx = z.infer<typeof ContextSchema>;
 
 const lookupPaymentHistory = defineTool({
   name: "lookupPaymentHistory",
-  description: "Fetch 90-day payment, promise-to-pay and contact-attempt history for a debtor.",
+  description:
+    "Fetch 90-day payment, promise-to-pay and contact-attempt history for a debtor.",
   schema: z.object({ accountId: z.string() }),
   handler: async ({ accountId }) => ({
     accountId,
@@ -73,18 +87,22 @@ const actionSelector = defineAgent({
       "legal_escalation",
     ]),
   }),
-  contextSelector: (ctx: Ctx) => ({ recoverabilityScore: ctx.recoverabilityScore ?? 0 }),
+  contextSelector: (ctx: Ctx) => ({
+    recoverabilityScore: ctx.recoverabilityScore ?? 0,
+  }),
 });
 
 const project = defineProject({
   name: "collection-decisioning",
-  description: "Score overdue accounts and route each one to the next-best collection action",
+  description:
+    "Score overdue accounts and route each one to the next-best collection action",
   goal: "Produce a next-best collection action for every overdue account in the queue",
   contextSchema: ContextSchema,
   agents: [recoverabilityScorer, actionSelector],
   supervisor: defineSupervisor<Ctx>({
     model: openai,
-    rules: "Score the account first, then pick the action. Stop when `nextAction` is set.",
+    rules:
+      "Score the account first, then pick the action. Stop when `nextAction` is set.",
     terminationCondition: (ctx) => ctx.nextAction !== undefined,
     maxTurns: 8,
   }),
@@ -186,7 +204,9 @@ const project = defineProject({
 });
 
 const finalCtx = await project.run(initial);
-const runs = await project.storage.listRuns({ projectName: "collection-decisioning" });
+const runs = await project.storage.listRuns({
+  projectName: "collection-decisioning",
+});
 const loaded = await project.storage.loadRun(runs[0]!.id);
 console.log(loaded?.events); // full event log
 ```
@@ -197,11 +217,16 @@ First-party durable adapters ship for Postgres and Redis:
 import { createPostgresStorage, createRedisStorage } from "@blull/circuitai";
 
 // Postgres (requires `pg`)
-const pg = createPostgresStorage({ connectionString: process.env.DATABASE_URL });
+const pg = createPostgresStorage({
+  connectionString: process.env.DATABASE_URL,
+});
 await pg.ensureSchema(); // create the runs/events tables once — or run pg.schemaSql yourself
 
 // Redis (requires `ioredis`)
-const redis = createRedisStorage({ url: process.env.REDIS_URL, ttlSeconds: 60 * 60 * 24 });
+const redis = createRedisStorage({
+  url: process.env.REDIS_URL,
+  ttlSeconds: 60 * 60 * 24,
+});
 
 const project = defineProject({
   // ...
@@ -213,11 +238,11 @@ Both implement the same `Storage` interface. Pass a pre-built `pool` / `client` 
 
 ## Human-in-the-loop: pause & resume
 
-A run can **suspend itself for human input** and be **resumed later** — even from a different process — without re-running any completed work. The `project.paused` event written to storage *is* the durable checkpoint: it carries the full blackboard context, the turn cursor, and accumulated usage. `project.resume(runId)` restores that state and continues the supervisor loop.
+A run can **suspend itself for human input** and be **resumed later** — even from a different process — without re-running any completed work. The `project.paused` event written to storage _is_ the durable checkpoint: it carries the full blackboard context, the turn cursor, and accumulated usage. `project.resume(runId)` restores that state and continues the supervisor loop.
 
 There are two ways to pause:
 
-1. **A deterministic gate** — `supervisor.pauseCondition`, checked each turn *before* the supervisor LLM is consulted (so a gate pause costs zero supervisor calls). This is the robust primitive for approval flows.
+1. **A deterministic gate** — `supervisor.pauseCondition`, checked each turn _before_ the supervisor LLM is consulted (so a gate pause costs zero supervisor calls). This is the robust primitive for approval flows.
 2. **A supervisor decision** — the supervisor LLM can choose `{ kind: 'pause', reason, awaiting }` when it decides it needs a human.
 
 ```ts
@@ -257,7 +282,9 @@ for await (const event of project.stream(initialContext)) {
 // needed. `resume` returns the same event stream as `stream()`; the human's
 // decision is merged into the restored context.
 let final;
-for await (const event of project.resume(runId, { input: { approval: "approved" } })) {
+for await (const event of project.resume(runId, {
+  input: { approval: "approved" },
+})) {
   if (event.type === "project.completed") final = event.context;
 }
 ```
@@ -360,7 +387,7 @@ Scripted responses for unit and integration tests. No network. No API keys.
 ## Examples
 
 - `examples/with-mock-provider/run.ts` — fully offline run using the mock provider.
-- `examples/human-in-the-loop/run.ts` — fully offline pause → human approval → resume, where a *second* project instance resumes the run from shared storage (mimicking another process).
+- `examples/human-in-the-loop/run.ts` — fully offline pause → human approval → resume, where a _second_ project instance resumes the run from shared storage (mimicking another process).
 - `examples/studio/run.ts` — fully offline Studio: seeds completed/paused runs and a live-run generator into a shared in-memory store, then serves Studio at `http://localhost:3030`.
 - `examples/cobranca/openai.ts` — same project with OpenAI's `gpt-5.4-mini`.
 - `examples/cobranca/anthropic.ts` — same project with Anthropic's Claude.
@@ -372,14 +399,6 @@ pnpm tsx examples/studio/run.ts          # then open http://localhost:3030
 OPENAI_API_KEY=sk-... pnpm tsx examples/cobranca/openai.ts
 ANTHROPIC_API_KEY=sk-... pnpm tsx examples/cobranca/anthropic.ts
 ```
-
-## Status
-
-@blull/circuitai focuses on getting orchestration, type safety, persistence, observability, and visualization right. The roadmap:
-
-- **v0.2 (shipped)** — Postgres + Redis storage adapters, an OpenTelemetry telemetry adapter, and token streaming (`agent.delta` events).
-- **v0.3 (shipped)** — human-in-the-loop pause/resume on a durable event-log checkpoint: a `pauseCondition` gate, a supervisor `pause` decision, `project.paused` / `project.resumed` events, and `project.resume(runId, { input })`.
-- **v0.4 (shipped)** — @blull/circuitai Studio (`@blull/circuitai/studio`): a self-hostable visual graph viewer and live run debugger with human-in-the-loop resume, served over your existing `Storage` with zero new runtime dependencies.
 
 ## License
 

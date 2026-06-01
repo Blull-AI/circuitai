@@ -384,22 +384,6 @@ const agent = defineAgent({
 
 Scripted responses for unit and integration tests. No network. No API keys.
 
-## Examples
-
-- `examples/with-mock-provider/run.ts` — fully offline run using the mock provider.
-- `examples/human-in-the-loop/run.ts` — fully offline pause → human approval → resume, where a _second_ project instance resumes the run from shared storage (mimicking another process).
-- `examples/studio/run.ts` — fully offline Studio: seeds completed/paused runs and a live-run generator into a shared in-memory store, then serves Studio at `http://localhost:3030`.
-- `examples/cobranca/openai.ts` — same project with OpenAI's `gpt-5.4-mini`.
-- `examples/cobranca/anthropic.ts` — same project with Anthropic's Claude.
-
-```sh
-pnpm tsx examples/with-mock-provider/run.ts
-pnpm tsx examples/human-in-the-loop/run.ts
-pnpm tsx examples/studio/run.ts          # then open http://localhost:3030
-OPENAI_API_KEY=sk-... pnpm tsx examples/cobranca/openai.ts
-ANTHROPIC_API_KEY=sk-... pnpm tsx examples/cobranca/anthropic.ts
-```
-
 ## License
 
 MIT
